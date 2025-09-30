@@ -1,14 +1,51 @@
 from django.db import models
 from datetime import timedelta
 from django.utils import timezone
-from django.db import models
 from decimal import Decimal
+
+
+def default_roster_expiration():
+    return timezone.now().date() + timedelta(days=90)
 
 class School(models.Model):
     name = models.CharField(max_length=255, unique=True)
     city = models.CharField(max_length=120, blank=True)
     state = models.CharField(max_length=2, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+
+
+    country = models.CharField(max_length=100, blank=True)  # NEW
+    purchased_accounts = models.PositiveIntegerField(
+        default=0,
+        help_text="Purchased account allotment for this school."
+    )  # NEW
+
+    def clean(self):
+        # Require at least State or Country (either is fine)
+        from django.core.exceptions import ValidationError
+        if not (self.state or self.country):
+            raise ValidationError("Provide either a State or a Country.")
+
+    @property
+    def activated_accounts(self):
+        """
+        # of unique students at this school that are on at least one roster
+        (across any professor in the school).
+        """
+        Through = Roster.students.through  # avoids relying on related_name
+        return (
+            Through.objects
+            .filter(roster__professor__school=self)
+            .values("student_id")
+            .distinct()
+            .count()
+        )
+    
+    @property
+    def available_accounts(self):
+        return max(self.purchased_accounts - self.activated_accounts, 0)
 
     class Meta:
         ordering = ["name"]
@@ -73,6 +110,12 @@ class Roster(models.Model):
     discount_amount = models.DecimalField(max_digits=8, decimal_places=2, default=Decimal("0.00"))
     invoice_sent = models.BooleanField(default=False)
 
+    expiration_date = models.DateField(default=default_roster_expiration)  # NEW
+
+    @property
+    def is_expired(self):
+        return bool(self.expiration_date and self.expiration_date < timezone.now().date())
+    
     # students in this class/list
     students = models.ManyToManyField('Student', related_name='rosters', blank=True)
 
