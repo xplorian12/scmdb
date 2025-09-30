@@ -1,18 +1,40 @@
-# campus/admin.py — full file
+# campus/admin.py — revised
 
 from decimal import Decimal
 import csv
 from io import TextIOWrapper
 
+from django import forms
 from django.contrib import admin, messages
+from django.contrib.admin.widgets import FilteredSelectMultiple
 from django.db import transaction
 from django.db.models import Count
 from django.utils import timezone
 
 from .models import School, Professor, Student, Roster
-from .forms import RosterForm
+from .forms import RosterForm  # keeps your existing custom form (upload fields etc.)
 
 PRICE_PER_STUDENT = Decimal("64.95")
+
+
+# ---------- Helpers ----------
+def excel_col_to_index(val: str) -> int:
+    """
+    Accepts 'B'/'b'/'AA' -> 2/27, or '2' -> 2.
+    """
+    s = str(val or "").strip()
+    if not s:
+        raise ValueError("Email column is required.")
+    if s.isdigit():
+        return int(s)
+    # letters -> number (A=1)
+    s = s.upper()
+    n = 0
+    for ch in s:
+        if not ('A' <= ch <= 'Z'):
+            raise ValueError(f"Bad column: {val}")
+        n = n * 26 + (ord(ch) - ord('A') + 1)
+    return n
 
 
 # ---------- Inlines ----------
@@ -32,12 +54,21 @@ class RosterInline(admin.TabularInline):
 
 
 class RosterStudentInline(admin.TabularInline):
-    """Inline shows which students are in this roster."""
+    """
+    Shows membership in THIS roster; delete checkbox removes the membership only.
+    """
     model = Roster.students.through
     extra = 0
+    can_delete = True
     verbose_name = "Student"
     verbose_name_plural = "Students in this roster"
     raw_id_fields = ("student",)
+    fields = ("student", "email")
+    readonly_fields = ("email",)
+
+    def email(self, obj):
+        return getattr(obj.student, "email", "")
+    email.short_description = "Email"
 
 
 # ---------- Admins ----------
@@ -79,7 +110,7 @@ class RosterAdmin(admin.ModelAdmin):
         "professor",
         "school_col",
         "student_count_col",
-        "discount_percent_col",   # <-- show % instead of raw field name
+        "discount_percent_col",
         "total_invoice_col",
         "invoice_sent",
         "created_at",
@@ -113,7 +144,6 @@ class RosterAdmin(admin.ModelAdmin):
 
     @admin.display(description="Status")
     def status_col(self, obj):
-        # Active if any non-expired students; fall back to any students
         now = timezone.now().date()
         try:
             active = obj.students.filter(expiration_date__gt=now).exists()
@@ -137,7 +167,7 @@ class RosterAdmin(admin.ModelAdmin):
         total = total_before * (Decimal("1") - pct)
         return f"${total:.2f}"
 
-    # ---- Filter the "Students:" multi-select to only this professor's students
+    # ---- Form tweaks: widget & discount relabel
     def get_form(self, request, obj=None, **kwargs):
         request._roster_obj = obj  # stash so formfield_for_manytomany can see it
         form = super().get_form(request, obj, **kwargs)
@@ -153,6 +183,10 @@ class RosterAdmin(admin.ModelAdmin):
 
     def formfield_for_manytomany(self, db_field, request, **kwargs):
         if db_field.name == "students":
+            # Better multi-select widget
+            kwargs["widget"] = FilteredSelectMultiple("Students", is_stacked=False)
+
+            # Filter to the chosen professor's students
             prof_id = request.POST.get("professor")
             if not prof_id and getattr(request, "_roster_obj", None):
                 prof_id = request._roster_obj.professor_id
@@ -181,25 +215,51 @@ class RosterAdmin(admin.ModelAdmin):
         super().save_model(request, obj, form, change)
 
         upload = form.cleaned_data.get("csv_file")
-        email_col = (form.cleaned_data.get("email_column") or "").strip()
+        email_col_raw = (form.cleaned_data.get("email_column") or "").strip()
         skip_rows = form.cleaned_data.get("skip_rows") or 0
 
         if not upload:
             return  # no file provided
 
         def resolve_email_index(header_row, email_column_value):
-            if email_column_value.isdigit():
-                idx = int(email_column_value) - 1
+            """
+            Supports:
+            - numeric index (1-based): '2'
+            - Excel letters: 'B', 'AA'  -> convert to 1-based, then to 0-based
+            - header names: 'email', etc.
+            """
+            s = str(email_column_value or "").strip()
+            if not s:
+                raise ValueError("Email column is required.")
+
+            # Number?
+            if s.isdigit():
+                idx = int(s) - 1
                 if idx < 0 or idx >= len(header_row):
                     raise ValueError("Email column number is out of range.")
                 return idx
-            wanted = email_column_value.lower()
+
+            # Excel letters?
+            if s.isalpha():
+                idx1 = excel_col_to_index(s)  # 1-based
+                idx0 = idx1 - 1
+                if idx0 < 0 or idx0 >= len(header_row):
+                    # If they typed a letter beyond width, fall back to header name matching.
+                    pass
+                else:
+                    return idx0
+
+            # Header name match (case-insensitive)
+            wanted = s.lower()
             normalized = [str(h or "").strip().lower() for h in header_row]
             if wanted in normalized:
                 return normalized.index(wanted)
+
+            # Best-effort common email labels
             for c in ["email", "e-mail", "email address", "mail"]:
                 if c in normalized:
                     return normalized.index(c)
+
             raise ValueError(
                 f"Could not find email column '{email_column_value}'. "
                 f"Available headers: {', '.join([str(x) for x in header_row])}"
@@ -276,7 +336,7 @@ class RosterAdmin(admin.ModelAdmin):
             return
 
         try:
-            email_idx = resolve_email_index(header, email_col)
+            email_idx = resolve_email_index(header, email_col_raw)
         except ValueError as e:
             messages.error(request, str(e))
             return
