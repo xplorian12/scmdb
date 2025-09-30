@@ -11,7 +11,7 @@ from django.db.models import Count
 from django.utils import timezone
 
 from .models import School, Professor, Student, Roster
-from .forms import RosterForm  # keeps your upload fields (csv_file, email_column, skip_rows, etc.)
+from .forms import RosterForm  # keeps your CSV/XLSX upload fields etc.
 
 PRICE_PER_STUDENT = Decimal("64.95")
 
@@ -32,27 +32,40 @@ class RosterInline(admin.TabularInline):
     show_change_link = True
 
 
+# Inline form adds a non-model "remove" checkbox we handle on save.
+class RosterStudentInlineForm(forms.ModelForm):
+    remove = forms.BooleanField(required=False, label="Remove")
+
+    class Meta:
+        model = Roster.students.through
+        fields = "__all__"  # 'remove' is extra and will be added by the form
+
+
 class RosterStudentInline(admin.TabularInline):
     """
-    Shows membership in THIS roster; delete checkbox removes the membership only.
-    Only place where students are visible/managed.
+    The only place to manage students for THIS roster.
+    Has a 'Remove' checkbox (supports Shift+click range select).
     """
     model = Roster.students.through
+    form = RosterStudentInlineForm
     extra = 0
-    can_delete = True
+    can_delete = False  # we handle removal via our 'remove' checkbox
     verbose_name = "Student"
     verbose_name_plural = "Students in this roster"
     raw_id_fields = ("student",)
-    fields = ("student", "email")
+    fields = ("remove", "student", "email")  # show remove first for easy multi-select
     readonly_fields = ("email",)
 
     class Media:
-        # Enables Shift+click range selection for the delete checkboxes
-        js = ("admin/roster_inline_shift_select.js",)
+        js = ("admin/roster_inline_shift_select.js",)  # enables Shift+click on 'remove'
 
     def email(self, obj):
         return getattr(obj.student, "email", "")
     email.short_description = "Email"
+
+    # Optional: prevent adding rows by hand (uploads should add students)
+    def has_add_permission(self, request, obj):
+        return False
 
 
 # ---------- Admins ----------
@@ -75,7 +88,7 @@ class ProfessorAdmin(admin.ModelAdmin):
     inlines = [RosterInline]
 
 
-# Hide Students from the sidebar — manage via Rosters
+# Hide Students from the sidebar — manage via Rosters only
 try:
     admin.site.unregister(Student)
 except Exception:
@@ -85,11 +98,9 @@ except Exception:
 @admin.register(Roster)
 class RosterAdmin(admin.ModelAdmin):
     form = RosterForm
-    # Your template with “Copy to Clipboard” / Select All buttons
-    change_form_template = "admin/campus/roster/change_form.html"
+    change_form_template = "admin/campus/roster/change_form.html"  # keep your template
 
-    # Do NOT show the M2M "students" field at the top; everything happens in the inline.
-    # We remove it even if the ModelForm included it.
+    # Ensure the top M2M selector never appears (everything in the inline).
     exclude = ("students",)
 
     list_display = (
@@ -111,7 +122,7 @@ class RosterAdmin(admin.ModelAdmin):
     inlines = [RosterStudentInline]
     autocomplete_fields = ("professor",)
 
-    # ---- Ensure the students M2M never renders at the top, even if present on the form
+    # Remove the students field from the form even if included by the ModelForm
     def get_form(self, request, obj=None, **kwargs):
         form = super().get_form(request, obj, **kwargs)
         form.base_fields.pop("students", None)
@@ -125,12 +136,12 @@ class RosterAdmin(admin.ModelAdmin):
             f.widget.attrs.setdefault("placeholder", "e.g., 15 for 15%")
         return form
 
-    # ---- Annotated count for list page
+    # Annotated count for list page
     def get_queryset(self, request):
         qs = super().get_queryset(request)
         return qs.annotate(student_count=Count("students", distinct=True))
 
-    # ---- Computed columns
+    # Computed columns
     @admin.display(description="School")
     def school_col(self, obj):
         return obj.professor.school
@@ -155,10 +166,6 @@ class RosterAdmin(admin.ModelAdmin):
 
     @admin.display(description="Total invoice")
     def total_invoice_col(self, obj):
-        """
-        total = (count * price) * (1 - discount_percent/100)
-        discount_amount field is treated as a PERCENT (0–100).
-        """
         count = getattr(obj, "student_count", obj.students.count())
         total_before = PRICE_PER_STUDENT * Decimal(count)
         pct = (obj.discount_amount or Decimal("0")) / Decimal("100")
@@ -169,7 +176,7 @@ class RosterAdmin(admin.ModelAdmin):
         total = total_before * (Decimal("1") - pct)
         return f"${total:.2f}"
 
-    # ---- Keep your clipboard data for the template button
+    # Clipboard data for your template button
     def render_change_form(self, request, context, add=False, change=False, form_url="", obj=None):
         emails_csv = ""
         if obj:
@@ -177,7 +184,21 @@ class RosterAdmin(admin.ModelAdmin):
         context["roster_emails_csv"] = emails_csv
         return super().render_change_form(request, context, add, change, form_url, obj)
 
-    # ---- Import (CSV/XLSX/XML) — unchanged except: email column can be letter OR number reliably
+    # ---- Handle removal via the inline "remove" checkbox
+    def save_formset(self, request, form, formset, change):
+        # First, delete memberships marked for removal
+        for f in formset.forms:
+            # cleaned_data exists since admin validated the formset
+            if getattr(f, "cleaned_data", None):
+                if f.cleaned_data.get("remove") and f.instance.pk:
+                    f.instance.delete()
+        # Now save remaining edits normally
+        instances = formset.save(commit=False)
+        for obj in instances:
+            obj.save()
+        formset.save_m2m()
+
+    # ---- Import (CSV/XLSX/XML). No logic change, just robust column parsing (letter or number)
     def save_model(self, request, obj, form, change):
         super().save_model(request, obj, form, change)
 
@@ -200,7 +221,7 @@ class RosterAdmin(admin.ModelAdmin):
                     raise ValueError("Email column number is out of range.")
                 return idx
 
-            # Excel letters? (A=1)
+            # Letters? (A=1)
             if s.isalpha():
                 def letters_to_index(v):
                     v = v.upper()
@@ -214,7 +235,7 @@ class RosterAdmin(admin.ModelAdmin):
                 idx0 = idx1 - 1
                 if 0 <= idx0 < len(header_row):
                     return idx0
-                # fall through to header-name matching if out of range
+                # otherwise fall through to header matching
 
             # Header name match (case-insensitive)
             wanted = s.lower()
@@ -239,10 +260,7 @@ class RosterAdmin(admin.ModelAdmin):
                 try:
                     from openpyxl import load_workbook
                 except Exception:
-                    messages.error(
-                        request,
-                        "To read .xlsx files, install openpyxl:  pip install openpyxl",
-                    )
+                    messages.error(request, "To read .xlsx files, install openpyxl:  pip install openpyxl")
                     return None
                 try:
                     upload_file.file.seek(0)
