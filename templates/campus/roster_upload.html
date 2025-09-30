@@ -1,0 +1,98 @@
+{% load static %}
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Upload Roster CSV</title>
+  <!-- Your Tailwind pipeline is already set up -->
+</head>
+<body class="min-h-screen bg-gray-50 p-6">
+  <div class="max-w-3xl mx-auto bg-white shadow rounded-2xl p-6">
+    <h1 class="text-2xl font-semibold mb-4">Upload Roster CSV</h1>
+
+    {% if messages %}
+      <ul class="mb-4">
+        {% for message in messages %}
+          <li class="p-3 rounded mb-2 {% if message.tags == 'success' %}bg-green-50 text-green-800{% else %}bg-red-50 text-red-800{% endif %}">
+            {{ message }}
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+
+    <form method="post" enctype="multipart/form-data" class="space-y-4" id="uploadForm">
+      {% csrf_token %}
+      <div>
+        <label class="block text-sm font-medium mb-1">Professor</label>
+        {{ form.professor }}
+      </div>
+      <div>
+        <label class="block text-sm font-medium mb-1">Roster name</label>
+        {{ form.roster_name }}
+      </div>
+
+      <div
+        id="dropzone"
+        class="border-2 border-dashed rounded-xl p-6 text-center hover:bg-gray-50"
+      >
+        <p class="mb-2 font-medium">Drag & drop CSV here, or click to browse</p>
+        {{ form.csv_file }}
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label class="block text-sm font-medium mb-1">Email column (name or number)</label>
+          {{ form.email_column }}
+          <p class="text-xs text-gray-500 mt-1">Header is auto-skipped. If you enter a number, use 1 for the first column.</p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">Extra rows to skip</label>
+          {{ form.skip_rows }}
+        </div>
+      </div>
+
+      <button class="px-4 py-2 rounded-xl shadow bg-blue-600 text-white" type="submit">Process CSV</button>
+      <a href="{% url 'admin:index' %}" class="ml-3 text-sm text-gray-600 underline">Back to admin</a>
+    </form>
+
+    {% if emails %}
+      <hr class="my-6">
+      <h2 class="text-xl font-semibold mb-2">Emails</h2>
+      <textarea id="emailsBox" class="w-full h-40 border rounded p-3">{{ emails }}</textarea>
+      <button id="copyBtn" class="mt-2 px-3 py-2 rounded bg-gray-800 text-white">Copy to clipboard</button>
+
+      {% if roster %}
+        <p class="mt-4 text-sm text-gray-600">
+          Saved {{ linked_count }} link(s) into roster <strong>{{ roster.name }}</strong> under
+          <strong>{{ roster.professor }}</strong>. New students created: {{ created_count }}.
+        </p>
+      {% endif %}
+    {% endif %}
+  </div>
+
+  <script>
+    // Simple drag-click behavior
+    const drop = document.getElementById('dropzone');
+    const fileInput = document.getElementById('id_csv_file');
+    drop.addEventListener('click', () => fileInput.click());
+    drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('bg-gray-100'); });
+    drop.addEventListener('dragleave', e => { drop.classList.remove('bg-gray-100'); });
+    drop.addEventListener('drop', e => {
+      e.preventDefault();
+      drop.classList.remove('bg-gray-100');
+      if (e.dataTransfer.files.length) {
+        fileInput.files = e.dataTransfer.files;
+      }
+    });
+
+    // Copy to clipboard
+    const copyBtn = document.getElementById('copyBtn');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', async () => {
+        const txt = document.getElementById('emailsBox').value;
+        try { await navigator.clipboard.writeText(txt); copyBtn.textContent = 'Copied!'; }
+        catch { /* fallback */ document.getElementById('emailsBox').select(); document.execCommand('copy'); }
+      });
+    }
+  </script>
+</body>
+</html>

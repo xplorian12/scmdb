@@ -1,0 +1,55 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+
+{% block content %}
+  <div class="module">
+    <h1>Import roster CSV</h1>
+
+    {% if messages %}
+      <ul class="messagelist">
+        {% for message in messages %}
+          <li class="{{ message.tags }}">{{ message }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+
+    <form method="post" enctype="multipart/form-data" class="aligned">
+      {% csrf_token %}
+      <fieldset class="module aligned">
+        <div class="form-row">{{ form.professor.label_tag }} {{ form.professor }}</div>
+        <div class="form-row">{{ form.roster_name.label_tag }} {{ form.roster_name }}</div>
+        <div class="form-row">{{ form.csv_file.label_tag }} {{ form.csv_file }}</div>
+        <div class="form-row">{{ form.email_column.label_tag }} {{ form.email_column }}</div>
+        <div class="form-row">{{ form.skip_rows.label_tag }} {{ form.skip_rows }}</div>
+      </fieldset>
+      <div class="submit-row">
+        <input type="submit" value="Process CSV" class="default">
+        <a href="{% url 'admin:campus_student_changelist' %}" class="deletelink">Back to Students</a>
+      </div>
+    </form>
+
+    {% if emails %}
+      <h2>Emails</h2>
+      <textarea id="emailsBox" style="width:100%;height:12rem;">{{ emails }}</textarea>
+      <p><a href="#" id="copyBtn" class="button">Copy to clipboard</a></p>
+
+      {% if roster %}
+        <p>Saved {{ linked_count }} link(s) to roster <strong>{{ roster.name }}</strong> under
+           <strong>{{ roster.professor }}</strong>. New students: {{ created_count }}.</p>
+      {% endif %}
+    {% endif %}
+  </div>
+
+  <script>
+    const copyBtn = document.getElementById('copyBtn');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', function(e){
+        e.preventDefault();
+        const box = document.getElementById('emailsBox');
+        box.select();
+        document.execCommand('copy');
+        copyBtn.textContent = 'Copied!';
+      });
+    }
+  </script>
+{% endblock %}

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% block title %}SCM Admin{% endblock %}</title>
+
+  <!-- Tailwind output css (built in step C) -->
+  <link rel="stylesheet" href="/static/styles/output.css" />
+
+  <!-- HTMX (no setup needed) -->
+  <script src="https://unpkg.com/htmx.org@1.9.12" defer></script>
+</head>
+<body class="min-h-screen bg-slate-50 text-slate-900">
+  <header class="p-4 border-b bg-white">
+    <div class="mx-auto max-w-6xl font-semibold">SCM Admin</div>
+  </header>
+
+  <main class="mx-auto max-w-6xl p-4">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

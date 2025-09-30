@@ -1,0 +1,77 @@
+{% extends "admin/change_form.html" %}
+
+{% block submit_buttons_bottom %}
+  {{ block.super }}
+  <button type="button" class="button" id="copy-emails-btn" style="margin-left:10px;">
+    Copy to Clipboard
+  </button>
+  <textarea id="emails-source" style="position:absolute;left:-9999px;top:-9999px;">{{ roster_emails_csv }}</textarea>
+
+  <script>
+    (function () {
+      // Copy emails button
+      var btn = document.getElementById('copy-emails-btn');
+      if (btn) {
+        btn.addEventListener('click', function (e) {
+          e.preventDefault();
+          var text = document.getElementById('emails-source').value || '';
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function () {
+              alert('Emails copied to clipboard.');
+            }, function () {
+              var ta = document.getElementById('emails-source');
+              ta.select(); document.execCommand('copy');
+              alert('Emails copied to clipboard.');
+            });
+          } else {
+            var ta = document.getElementById('emails-source');
+            ta.select(); document.execCommand('copy');
+            alert('Emails copied to clipboard.');
+          }
+        });
+      }
+
+      // Add "Select all" / "Clear all" for inline DELETE checkboxes
+      function addSelectAllForInline() {
+        var groups = document.querySelectorAll('.inline-group');
+        groups.forEach(function (grp) {
+          var title = grp.querySelector('h2');
+          if (!title) return;
+
+          // Only add once
+          if (grp.dataset.selectAllAdded) return;
+          grp.dataset.selectAllAdded = "1";
+
+          var wrap = document.createElement('span');
+          wrap.style.marginLeft = '10px';
+
+          var btnAll = document.createElement('button');
+          btnAll.type = 'button';
+          btnAll.className = 'button';
+          btnAll.textContent = 'Select all';
+          btnAll.style.marginRight = '6px';
+
+          var btnNone = document.createElement('button');
+          btnNone.type = 'button';
+          btnNone.className = 'button';
+          btnNone.textContent = 'Clear all';
+
+          wrap.appendChild(btnAll);
+          wrap.appendChild(btnNone);
+          title.appendChild(wrap);
+
+          function setAll(state) {
+            grp.querySelectorAll('input[type=checkbox]').forEach(function (cb) {
+              cb.checked = state;
+            });
+          }
+
+          btnAll.addEventListener('click', function(){ setAll(true); });
+          btnNone.addEventListener('click', function(){ setAll(false); });
+        });
+      }
+
+      addSelectAllForInline();
+    })();
+  </script>
+{% endblock %}
