@@ -1,4 +1,4 @@
-# campus/admin.py — revised
+# campus/admin.py
 
 from decimal import Decimal
 import csv
@@ -6,35 +6,14 @@ from io import TextIOWrapper
 
 from django import forms
 from django.contrib import admin, messages
-from django.contrib.admin.widgets import FilteredSelectMultiple
 from django.db import transaction
 from django.db.models import Count
 from django.utils import timezone
 
 from .models import School, Professor, Student, Roster
-from .forms import RosterForm  # keeps your existing custom form (upload fields etc.)
+from .forms import RosterForm  # keeps your upload fields (csv_file, email_column, skip_rows, etc.)
 
 PRICE_PER_STUDENT = Decimal("64.95")
-
-
-# ---------- Helpers ----------
-def excel_col_to_index(val: str) -> int:
-    """
-    Accepts 'B'/'b'/'AA' -> 2/27, or '2' -> 2.
-    """
-    s = str(val or "").strip()
-    if not s:
-        raise ValueError("Email column is required.")
-    if s.isdigit():
-        return int(s)
-    # letters -> number (A=1)
-    s = s.upper()
-    n = 0
-    for ch in s:
-        if not ('A' <= ch <= 'Z'):
-            raise ValueError(f"Bad column: {val}")
-        n = n * 26 + (ord(ch) - ord('A') + 1)
-    return n
 
 
 # ---------- Inlines ----------
@@ -56,6 +35,7 @@ class RosterInline(admin.TabularInline):
 class RosterStudentInline(admin.TabularInline):
     """
     Shows membership in THIS roster; delete checkbox removes the membership only.
+    Only place where students are visible/managed.
     """
     model = Roster.students.through
     extra = 0
@@ -65,6 +45,10 @@ class RosterStudentInline(admin.TabularInline):
     raw_id_fields = ("student",)
     fields = ("student", "email")
     readonly_fields = ("email",)
+
+    class Media:
+        # Enables Shift+click range selection for the delete checkboxes
+        js = ("admin/roster_inline_shift_select.js",)
 
     def email(self, obj):
         return getattr(obj.student, "email", "")
@@ -78,7 +62,7 @@ class SchoolAdmin(admin.ModelAdmin):
     search_fields = ("name", "city")
     list_filter = ("state",)
     ordering = ("name",)
-    inlines = [ProfessorInline]  # School page lists its Professors
+    inlines = [ProfessorInline]
 
 
 @admin.register(Professor)
@@ -88,7 +72,7 @@ class ProfessorAdmin(admin.ModelAdmin):
     list_filter = ("school", "department")
     autocomplete_fields = ("school",)
     ordering = ("last_name", "first_name")
-    inlines = [RosterInline]  # Professor page lists their Rosters
+    inlines = [RosterInline]
 
 
 # Hide Students from the sidebar — manage via Rosters
@@ -101,8 +85,12 @@ except Exception:
 @admin.register(Roster)
 class RosterAdmin(admin.ModelAdmin):
     form = RosterForm
-    # Template adds “Copy to Clipboard” (+ Select All for inline checkboxes)
+    # Your template with “Copy to Clipboard” / Select All buttons
     change_form_template = "admin/campus/roster/change_form.html"
+
+    # Do NOT show the M2M "students" field at the top; everything happens in the inline.
+    # We remove it even if the ModelForm included it.
+    exclude = ("students",)
 
     list_display = (
         "status_col",
@@ -121,9 +109,23 @@ class RosterAdmin(admin.ModelAdmin):
     list_filter = ("professor__school", "invoice_sent")
     ordering = ("-created_at", "name")
     inlines = [RosterStudentInline]
-    autocomplete_fields = ("professor",)  # students managed via CSV/auto-add/inline
+    autocomplete_fields = ("professor",)
 
-    # ---- Queryset with annotated student count
+    # ---- Ensure the students M2M never renders at the top, even if present on the form
+    def get_form(self, request, obj=None, **kwargs):
+        form = super().get_form(request, obj, **kwargs)
+        form.base_fields.pop("students", None)
+        # Relabel & constrain the discount field as a percentage (0–100)
+        if "discount_amount" in form.base_fields:
+            f = form.base_fields["discount_amount"]
+            f.label = "Discount (%)"
+            f.help_text = "Enter a percent (0–100)."
+            f.min_value = 0
+            f.max_value = 100
+            f.widget.attrs.setdefault("placeholder", "e.g., 15 for 15%")
+        return form
+
+    # ---- Annotated count for list page
     def get_queryset(self, request):
         qs = super().get_queryset(request)
         return qs.annotate(student_count=Count("students", distinct=True))
@@ -167,42 +169,7 @@ class RosterAdmin(admin.ModelAdmin):
         total = total_before * (Decimal("1") - pct)
         return f"${total:.2f}"
 
-    # ---- Form tweaks: widget & discount relabel
-    def get_form(self, request, obj=None, **kwargs):
-        request._roster_obj = obj  # stash so formfield_for_manytomany can see it
-        form = super().get_form(request, obj, **kwargs)
-        # Relabel & constrain the discount field as a percentage (0–100)
-        if "discount_amount" in form.base_fields:
-            f = form.base_fields["discount_amount"]
-            f.label = "Discount (%)"
-            f.help_text = "Enter a percent (0–100)."
-            f.min_value = 0
-            f.max_value = 100
-            f.widget.attrs.setdefault("placeholder", "e.g., 15 for 15%")
-        return form
-
-    def formfield_for_manytomany(self, db_field, request, **kwargs):
-        if db_field.name == "students":
-            # Better multi-select widget
-            kwargs["widget"] = FilteredSelectMultiple("Students", is_stacked=False)
-
-            # Filter to the chosen professor's students
-            prof_id = request.POST.get("professor")
-            if not prof_id and getattr(request, "_roster_obj", None):
-                prof_id = request._roster_obj.professor_id
-            if prof_id:
-                kwargs["queryset"] = Student.objects.filter(professor_id=prof_id)
-            else:
-                kwargs["queryset"] = Student.objects.none()
-        return super().formfield_for_manytomany(db_field, request, **kwargs)
-
-    # ---- Hide the inline on the Add page (shows after first save)
-    def get_inline_instances(self, request, obj=None):
-        if obj is None:
-            return []
-        return super().get_inline_instances(request, obj)
-
-    # ---- Provide emails to template for the “Copy to Clipboard” button
+    # ---- Keep your clipboard data for the template button
     def render_change_form(self, request, context, add=False, change=False, form_url="", obj=None):
         emails_csv = ""
         if obj:
@@ -210,7 +177,7 @@ class RosterAdmin(admin.ModelAdmin):
         context["roster_emails_csv"] = emails_csv
         return super().render_change_form(request, context, add, change, form_url, obj)
 
-    # ---- CSV / XLSX / Excel-XML upload support (plus encodings fallback for CSV)
+    # ---- Import (CSV/XLSX/XML) — unchanged except: email column can be letter OR number reliably
     def save_model(self, request, obj, form, change):
         super().save_model(request, obj, form, change)
 
@@ -222,32 +189,32 @@ class RosterAdmin(admin.ModelAdmin):
             return  # no file provided
 
         def resolve_email_index(header_row, email_column_value):
-            """
-            Supports:
-            - numeric index (1-based): '2'
-            - Excel letters: 'B', 'AA'  -> convert to 1-based, then to 0-based
-            - header names: 'email', etc.
-            """
             s = str(email_column_value or "").strip()
             if not s:
                 raise ValueError("Email column is required.")
 
-            # Number?
+            # Number? (1-based)
             if s.isdigit():
                 idx = int(s) - 1
                 if idx < 0 or idx >= len(header_row):
                     raise ValueError("Email column number is out of range.")
                 return idx
 
-            # Excel letters?
+            # Excel letters? (A=1)
             if s.isalpha():
-                idx1 = excel_col_to_index(s)  # 1-based
+                def letters_to_index(v):
+                    v = v.upper()
+                    n = 0
+                    for ch in v:
+                        if not ('A' <= ch <= 'Z'):
+                            raise ValueError(f"Bad column: {v}")
+                        n = n * 26 + (ord(ch) - ord('A') + 1)
+                    return n
+                idx1 = letters_to_index(s)
                 idx0 = idx1 - 1
-                if idx0 < 0 or idx0 >= len(header_row):
-                    # If they typed a letter beyond width, fall back to header name matching.
-                    pass
-                else:
+                if 0 <= idx0 < len(header_row):
                     return idx0
+                # fall through to header-name matching if out of range
 
             # Header name match (case-insensitive)
             wanted = s.lower()
@@ -255,7 +222,6 @@ class RosterAdmin(admin.ModelAdmin):
             if wanted in normalized:
                 return normalized.index(wanted)
 
-            # Best-effort common email labels
             for c in ["email", "e-mail", "email address", "mail"]:
                 if c in normalized:
                     return normalized.index(c)
@@ -265,7 +231,6 @@ class RosterAdmin(admin.ModelAdmin):
                 f"Available headers: {', '.join([str(x) for x in header_row])}"
             )
 
-        # yield rows from CSV / XLSX / SpreadsheetML XML
         def iter_rows_from_upload(upload_file):
             name = (getattr(upload_file, "name", "") or "").lower()
 
@@ -383,22 +348,3 @@ class RosterAdmin(admin.ModelAdmin):
             f"Processed {len(emails)} record(s). "
             f"New students: {created_count}. Linked to this roster: {linked_count}.",
         )
-
-    # ---- Auto-link EVERY student visible in the box on Save (no highlighting required)
-    def save_related(self, request, form, formsets, change):
-        """
-        After Django saves the normal M2M selections, also add ALL students that
-        are visible in the 'Students:' box (filtered to the chosen professor).
-        """
-        super().save_related(request, form, formsets, change)
-        obj = form.instance  # the roster
-        students_field = form.fields.get("students")
-        if not students_field:
-            return
-        visible_qs = students_field.queryset  # already filtered to professor
-        if not visible_qs.exists():
-            return
-        already_ids = set(obj.students.values_list("pk", flat=True))
-        to_add = list(visible_qs.exclude(pk__in=already_ids))
-        if to_add:
-            obj.students.add(*to_add)
