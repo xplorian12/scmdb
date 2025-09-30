@@ -43,21 +43,21 @@ class RosterStudentInlineForm(forms.ModelForm):
 
 class RosterStudentInline(admin.TabularInline):
     model = Roster.students.through
-    extra = 1                      # show one blank row to add
-    can_delete = False             # we’re using the custom "remove" checkbox you added
-    # remove raw_id_fields if present:
-    # raw_id_fields = ("student",)
-    autocomplete_fields = ("student",)   # <-- search existing students
-    fields = ("remove", "student", "email")
+    form = RosterStudentInlineForm          # <-- ensure 'remove' renders
+    extra = 1                               # show one blank row to add
+    can_delete = False                      # we handle removal via 'remove'
+    autocomplete_fields = ("student",)      # search existing students
+    fields = ("remove", "student", "email") # show remove first for easy multi-select
     readonly_fields = ("email",)
-    class Media:
-        js = ("admin/roster_inline_shift_select.js",)
 
-    # ✅ allow adding rows in the inline
+    class Media:
+        js = ("admin/roster_inline_shift_select.js",)  # Shift+click range select
+
+    # allow adding rows in the inline
     def has_add_permission(self, request, obj):
         return True
 
-    # Filter the "student" dropdown/search to this roster’s professor
+    # filter the "student" choices to this roster’s professor
     def get_formset(self, request, obj=None, **kwargs):
         self._parent_roster = obj
         return super().get_formset(request, obj, **kwargs)
@@ -74,10 +74,6 @@ class RosterStudentInline(admin.TabularInline):
     def email(self, obj):
         return getattr(obj.student, "email", "")
 
-    # Optional: prevent adding rows by hand (uploads should add students)
-    def has_add_permission(self, request, obj):
-        return False
-
 
 # ---------- Admins ----------
 @admin.register(School)
@@ -88,6 +84,7 @@ class SchoolAdmin(admin.ModelAdmin):
     ordering = ("name",)
     inlines = [ProfessorInline]
 
+
 @admin.register(Student)
 class StudentAdmin(admin.ModelAdmin):
     search_fields = ("email", "first_name", "last_name", "professor__last_name", "professor__first_name")
@@ -96,7 +93,8 @@ class StudentAdmin(admin.ModelAdmin):
     # Hide Students from the sidebar/index, but keep admin views for the popup.
     def has_module_permission(self, request):
         return False
-        
+
+
 @admin.register(Professor)
 class ProfessorAdmin(admin.ModelAdmin):
     list_display = ("last_name", "first_name", "school", "department", "email", "hire_date")
@@ -105,13 +103,6 @@ class ProfessorAdmin(admin.ModelAdmin):
     autocomplete_fields = ("school",)
     ordering = ("last_name", "first_name")
     inlines = [RosterInline]
-
-
-# Hide Students from the sidebar — manage via Rosters only
-try:
-    admin.site.unregister(Student)
-except Exception:
-    pass
 
 
 @admin.register(Roster)
@@ -207,7 +198,6 @@ class RosterAdmin(admin.ModelAdmin):
     def save_formset(self, request, form, formset, change):
         # First, delete memberships marked for removal
         for f in formset.forms:
-            # cleaned_data exists since admin validated the formset
             if getattr(f, "cleaned_data", None):
                 if f.cleaned_data.get("remove") and f.instance.pk:
                     f.instance.delete()
@@ -217,7 +207,7 @@ class RosterAdmin(admin.ModelAdmin):
             obj.save()
         formset.save_m2m()
 
-    # ---- Import (CSV/XLSX/XML). No logic change, just robust column parsing (letter or number)
+    # ---- Import (CSV/XLSX/XML). Robust column parsing (letter or number)
     def save_model(self, request, obj, form, change):
         super().save_model(request, obj, form, change)
 
@@ -379,10 +369,6 @@ class RosterAdmin(admin.ModelAdmin):
             if hasattr(upload, "name") and not obj.source_filename:
                 obj.source_filename = upload.name
                 obj.save(update_fields=["source_filename"])
-
-
-
-        
 
         messages.success(
             request,
