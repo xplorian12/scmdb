@@ -11,12 +11,15 @@ from django.db.models import Count
 from django.utils import timezone
 
 from .models import School, Professor, Student, Roster
-from .forms import RosterForm  # keeps your CSV/XLSX upload fields etc.
+from .forms import RosterForm  # your CSV/XLSX upload fields etc.
 
 PRICE_PER_STUDENT = Decimal("64.95")
 
 
-# ---------- Inlines ----------
+# =========================
+# Inlines
+# =========================
+
 class ProfessorInline(admin.TabularInline):
     model = Professor
     extra = 0
@@ -25,39 +28,52 @@ class ProfessorInline(admin.TabularInline):
 
 
 class RosterInline(admin.TabularInline):
+    """
+    Shown on the Professor page to list that professor's rosters.
+    Includes Created, Expiration, and computed Status.
+    """
     model = Roster
     extra = 0
-    fields = ("name", "created_at", "source_filename")
-    readonly_fields = ("created_at", "source_filename")
+    fields = ("name", "created_at", "expiration_date", "status_inline", "source_filename")
+    readonly_fields = ("created_at", "status_inline", "source_filename")
     show_change_link = True
 
+    @admin.display(description="Status")
+    def status_inline(self, obj):
+        return "Expired" if getattr(obj, "is_expired", False) else "Active"
 
-# Inline form adds a non-model "remove" checkbox we handle on save.
+
+# --- Inline form adds a non-model "remove" checkbox we handle on save.
 class RosterStudentInlineForm(forms.ModelForm):
     remove = forms.BooleanField(required=False, label="Remove")
 
     class Meta:
         model = Roster.students.through
-        fields = "__all__"  # 'remove' is extra and will be added by the form
+        fields = "__all__"  # 'remove' is extra and rendered by the form
 
 
 class RosterStudentInline(admin.TabularInline):
+    """
+    The ONLY place to manage students in THIS roster.
+    - 'Remove' checkbox per row (we delete the membership in save_formset)
+    - Shift-click range selection (requires static/admin/roster_inline_shift_select.js)
+    - One blank row to add a student; filtered to this roster's professor
+    """
     model = Roster.students.through
-    form = RosterStudentInlineForm          # <-- ensure 'remove' renders
-    extra = 1                               # show one blank row to add
-    can_delete = False                      # we handle removal via 'remove'
-    autocomplete_fields = ("student",)      # search existing students
-    fields = ("remove", "student", "email") # show remove first for easy multi-select
+    form = RosterStudentInlineForm
+    extra = 1
+    can_delete = False  # we handle via 'remove'
+    autocomplete_fields = ("student",)
+    fields = ("remove", "student", "email")
     readonly_fields = ("email",)
 
     class Media:
-        js = ("admin/roster_inline_shift_select.js",)  # Shift+click range select
+        js = ("admin/roster_inline_shift_select.js",)
 
-    # allow adding rows in the inline
     def has_add_permission(self, request, obj):
         return True
 
-    # filter the "student" choices to this roster’s professor
+    # Filter student choices to this roster's professor
     def get_formset(self, request, obj=None, **kwargs):
         self._parent_roster = obj
         return super().get_formset(request, obj, **kwargs)
@@ -75,28 +91,61 @@ class RosterStudentInline(admin.TabularInline):
         return getattr(obj.student, "email", "")
 
 
-# ---------- Admins ----------
+# =========================
+# Admin registrations
+# =========================
+
 @admin.register(School)
 class SchoolAdmin(admin.ModelAdmin):
-    list_display = ("name", "city", "state", "created_at")
+    """
+    Clear hierarchy: Schools → Professors (inline).
+    Shows Region (State or Country) and account counts (fields added in models.py).
+    """
+    list_display = (
+        "name",
+        "region_col",               # State or Country
+        "purchased_accounts",       # editable in form (models.py)
+        "activated_accounts_col",   # computed property (models.py)
+        "available_accounts_col",   # computed property (models.py)
+        "created_at",
+    )
     search_fields = ("name", "city")
-    list_filter = ("state",)
+    list_filter = ("state", "country")
     ordering = ("name",)
     inlines = [ProfessorInline]
+
+    @admin.display(description="Region")
+    def region_col(self, obj):
+        return obj.state or obj.country or ""
+
+    @admin.display(description="Activated")
+    def activated_accounts_col(self, obj):
+        # expects School.activated_accounts property in models.py
+        return getattr(obj, "activated_accounts", 0)
+
+    @admin.display(description="Available")
+    def available_accounts_col(self, obj):
+        # expects School.available_accounts property in models.py
+        return getattr(obj, "available_accounts", 0)
 
 
 @admin.register(Student)
 class StudentAdmin(admin.ModelAdmin):
+    """
+    Hidden from the sidebar, but registered so the green ➕ popup works.
+    """
     search_fields = ("email", "first_name", "last_name", "professor__last_name", "professor__first_name")
     autocomplete_fields = ("professor",)
 
-    # Hide Students from the sidebar/index, but keep admin views for the popup.
     def has_module_permission(self, request):
         return False
 
 
 @admin.register(Professor)
 class ProfessorAdmin(admin.ModelAdmin):
+    """
+    Middle of the hierarchy: School → Professor → Rosters inline.
+    """
     list_display = ("last_name", "first_name", "school", "department", "email", "hire_date")
     search_fields = ("last_name", "first_name", "email", "department", "school__name")
     list_filter = ("school", "department")
@@ -107,10 +156,14 @@ class ProfessorAdmin(admin.ModelAdmin):
 
 @admin.register(Roster)
 class RosterAdmin(admin.ModelAdmin):
+    """
+    Bottom object: has the student-membership inline only.
+    Also shows Expiration + Status in list_display.
+    """
     form = RosterForm
-    change_form_template = "admin/campus/roster/change_form.html"  # keep your template
+    change_form_template = "admin/campus/roster/change_form.html"  # your template (clipboard, etc.)
 
-    # Ensure the top M2M selector never appears (everything in the inline).
+    # Do NOT show the M2M "students" field at the top; everything is in the inline.
     exclude = ("students",)
 
     list_display = (
@@ -121,6 +174,7 @@ class RosterAdmin(admin.ModelAdmin):
         "student_count_col",
         "discount_percent_col",
         "total_invoice_col",
+        "expiration_date",   # requires models.py field
         "invoice_sent",
         "created_at",
     )
@@ -132,7 +186,7 @@ class RosterAdmin(admin.ModelAdmin):
     inlines = [RosterStudentInline]
     autocomplete_fields = ("professor",)
 
-    # Remove the students field from the form even if included by the ModelForm
+    # Remove the students field from the form even if ModelForm includes it
     def get_form(self, request, obj=None, **kwargs):
         form = super().get_form(request, obj, **kwargs)
         form.base_fields.pop("students", None)
@@ -146,12 +200,13 @@ class RosterAdmin(admin.ModelAdmin):
             f.widget.attrs.setdefault("placeholder", "e.g., 15 for 15%")
         return form
 
-    # Annotated count for list page
+    # Annotate student count for list page performance
     def get_queryset(self, request):
         qs = super().get_queryset(request)
         return qs.annotate(student_count=Count("students", distinct=True))
 
-    # Computed columns
+    # Computed columns ---------------------------------
+
     @admin.display(description="School")
     def school_col(self, obj):
         return obj.professor.school
@@ -167,26 +222,22 @@ class RosterAdmin(admin.ModelAdmin):
 
     @admin.display(description="Status")
     def status_col(self, obj):
-        now = timezone.now().date()
-        try:
-            active = obj.students.filter(expiration_date__gt=now).exists()
-        except Exception:
-            active = obj.students.exists()
-        return "Active" if active else "Expired"
+        return "Expired" if getattr(obj, "is_expired", False) else "Active"
 
     @admin.display(description="Total invoice")
     def total_invoice_col(self, obj):
+        """
+        total = (count * price) * (1 - discount_percent/100)
+        discount_amount is treated as a PERCENT (0–100).
+        """
         count = getattr(obj, "student_count", obj.students.count())
         total_before = PRICE_PER_STUDENT * Decimal(count)
         pct = (obj.discount_amount or Decimal("0")) / Decimal("100")
-        if pct < 0:
-            pct = Decimal("0")
-        if pct > 1:
-            pct = Decimal("1")
+        pct = max(Decimal("0"), min(Decimal("1"), pct))
         total = total_before * (Decimal("1") - pct)
         return f"${total:.2f}"
 
-    # Clipboard data for your template button
+    # Pass emails to your change_form template for the “Copy to Clipboard” button
     def render_change_form(self, request, context, add=False, change=False, form_url="", obj=None):
         emails_csv = ""
         if obj:
@@ -194,20 +245,20 @@ class RosterAdmin(admin.ModelAdmin):
         context["roster_emails_csv"] = emails_csv
         return super().render_change_form(request, context, add, change, form_url, obj)
 
-    # ---- Handle removal via the inline "remove" checkbox
+    # Handle removal via the inline "remove" checkbox
     def save_formset(self, request, form, formset, change):
-        # First, delete memberships marked for removal
+        # 1) Delete memberships marked for removal
         for f in formset.forms:
             if getattr(f, "cleaned_data", None):
                 if f.cleaned_data.get("remove") and f.instance.pk:
                     f.instance.delete()
-        # Now save remaining edits normally
+        # 2) Save remaining edits normally
         instances = formset.save(commit=False)
         for obj in instances:
             obj.save()
         formset.save_m2m()
 
-    # ---- Import (CSV/XLSX/XML). Robust column parsing (letter or number)
+    # Import (CSV/XLSX/XML) with robust column parsing (letter or number)
     def save_model(self, request, obj, form, change):
         super().save_model(request, obj, form, change)
 
