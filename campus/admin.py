@@ -140,6 +140,10 @@ class SchoolAdmin(admin.ModelAdmin):
     ordering = ("name",)
     inlines = [ProfessorInline]
 
+    actions = [add_purchased_accounts]
+    action_form = AddAccountsActionForm
+
+    
     # --- NEW: annotate counts in one query (prevents per-row queries & sqlite lock issues)
     def get_queryset(self, request):
         from django.db.models import Count, F, Case, When, Value, IntegerField
