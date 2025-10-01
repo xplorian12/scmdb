@@ -12,10 +12,12 @@ from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from .models import School, Professor, Student, Roster
-from .forms import RosterForm  # your CSV/XLSX upload fields etc.
+from .forms import RosterForm
 
 PRICE_PER_STUDENT = Decimal("64.95")
 
+# ===== Feature flag for the School list page =====
+ENABLE_SCHOOL_COUNTS = False   # <— start False so the School page cannot 500
 
 # =========================
 # Inlines
@@ -29,10 +31,6 @@ class ProfessorInline(admin.TabularInline):
 
 
 class RosterInline(admin.TabularInline):
-    """
-    Shown on the Professor page to list that professor's rosters.
-    Includes Created, Expiration, and computed Status.
-    """
     model = Roster
     extra = 0
     fields = ("name", "created_at", "expiration_date", "status_inline", "source_filename")
@@ -50,20 +48,14 @@ class RosterStudentInlineForm(forms.ModelForm):
 
     class Meta:
         model = Roster.students.through
-        fields = "__all__"  # 'remove' is extra and rendered by the form
+        fields = "__all__"
 
 
 class RosterStudentInline(admin.TabularInline):
-    """
-    Manage students in THIS roster.
-    - 'Remove' checkbox per row (we delete the membership in save_formset)
-    - Shift-click range selection (requires static/admin/roster_inline_shift_select.js)
-    - One blank row to add a student; choices filtered to this roster's professor
-    """
     model = Roster.students.through
     form = RosterStudentInlineForm
     extra = 1
-    can_delete = False  # we handle via 'remove'
+    can_delete = False
     autocomplete_fields = ("student",)
     fields = ("remove", "student", "email")
     readonly_fields = ("email",)
@@ -74,7 +66,6 @@ class RosterStudentInline(admin.TabularInline):
     def has_add_permission(self, request, obj):
         return True
 
-    # Filter student choices to this roster's professor
     def get_formset(self, request, obj=None, **kwargs):
         self._parent_roster = obj
         return super().get_formset(request, obj, **kwargs)
@@ -123,82 +114,79 @@ def add_purchased_accounts(modeladmin, request, queryset):
 
 @admin.register(School)
 class SchoolAdmin(admin.ModelAdmin):
-    list_display = (
-        "name",
-        "professors_count",
-        "rosters_count",
-        "students_count",
-        "activated_accounts_col",
-        "available_accounts_col",
-        "purchased_accounts",
-    )
-    search_fields = ("name", "city", "state", "country")
-    ordering = ("name",)
-    list_per_page = 50
+    """
+    SAFE MODE: the School changelist only shows 'name' unless ENABLE_SCHOOL_COUNTS=True.
+    This guarantees the page renders. Flip the flag to True after confirming it loads.
+    """
+    if not ENABLE_SCHOOL_COUNTS:
+        # --- Safe, minimal config ---
+        list_display = ("name",)
+        search_fields = ("name", "city", "state", "country")
+        ordering = ("name",)
+        list_per_page = 50
+    else:
+        # --- Full featured config (turn on once safe mode confirmed) ---
+        list_display = (
+            "name",
+            "professors_count",
+            "rosters_count",
+            "students_count",
+            "activated_accounts_col",
+            "available_accounts_col",
+            "purchased_accounts",
+        )
+        search_fields = ("name", "city", "state", "country")
+        ordering = ("name",)
+        list_per_page = 50
+        inlines = [ProfessorInline]
+        actions = [add_purchased_accounts]
+        action_form = AddAccountsActionForm
 
-    # show Professors inline on School (hierarchy: School → Professor)
-    inlines = [ProfessorInline]
-
-    # expose the bulk action on School
-    actions = [add_purchased_accounts]
-    action_form = AddAccountsActionForm
-
-    def get_queryset(self, request):
-        """
-        Annotate all counts safely using correct reverse names:
-        - professors: School.professors (from Professor.school related_name="professors")
-        - rosters:    Professor.rosters
-        - students:   Professor.students (direct), or via rosters if you prefer
-        - activated:  distinct students with expiration_date >= today
-        - available:  purchased - activated (clamped at 0)
-        """
-        qs = super().get_queryset(request)
-        today = timezone.now().date()
-
-        return (
-            qs
-            .annotate(
-                _professors_count=Count("professors", distinct=True),
-                _rosters_count=Count("professors__rosters", distinct=True),
-                _students_count=Count("professors__students", distinct=True),
-                _activated=Coalesce(
-                    Count(
-                        "professors__students",
-                        filter=Q(professors__students__expiration_date__gte=today),
-                        distinct=True,
+        def get_queryset(self, request):
+            qs = super().get_queryset(request)
+            today = timezone.now().date()
+            return (
+                qs.annotate(
+                    _professors_count=Count("professors", distinct=True),
+                    _rosters_count=Count("professors__rosters", distinct=True),
+                    _students_count=Count("professors__students", distinct=True),
+                    _activated=Coalesce(
+                        Count(
+                            "professors__students",
+                            filter=Q(professors__students__expiration_date__gte=today),
+                            distinct=True,
+                        ),
+                        Value(0),
                     ),
-                    Value(0),
-                ),
-            )
-            .annotate(
-                _available=Coalesce(
-                    F("purchased_accounts") - F("_activated"),
-                    Value(0),
-                    output_field=IntegerField(),
+                ).annotate(
+                    _available=Coalesce(
+                        F("purchased_accounts") - F("_activated"),
+                        Value(0),
+                        output_field=IntegerField(),
+                    )
                 )
             )
-        )
 
-    @admin.display(description="Professors", ordering="_professors_count")
-    def professors_count(self, obj):
-        return getattr(obj, "_professors_count", 0) or 0
+        @admin.display(description="Professors", ordering="_professors_count")
+        def professors_count(self, obj):
+            return getattr(obj, "_professors_count", 0) or 0
 
-    @admin.display(description="Rosters", ordering="_rosters_count")
-    def rosters_count(self, obj):
-        return getattr(obj, "_rosters_count", 0) or 0
+        @admin.display(description="Rosters", ordering="_rosters_count")
+        def rosters_count(self, obj):
+            return getattr(obj, "_rosters_count", 0) or 0
 
-    @admin.display(description="Students", ordering="_students_count")
-    def students_count(self, obj):
-        return getattr(obj, "_students_count", 0) or 0
+        @admin.display(description="Students", ordering="_students_count")
+        def students_count(self, obj):
+            return getattr(obj, "_students_count", 0) or 0
 
-    @admin.display(description="Activated", ordering="_activated")
-    def activated_accounts_col(self, obj):
-        return getattr(obj, "_activated", 0) or 0
+        @admin.display(description="Activated", ordering="_activated")
+        def activated_accounts_col(self, obj):
+            return getattr(obj, "_activated", 0) or 0
 
-    @admin.display(description="Available", ordering="_available")
-    def available_accounts_col(self, obj):
-        v = getattr(obj, "_available", 0) or 0
-        return max(0, int(v))
+        @admin.display(description="Available", ordering="_available")
+        def available_accounts_col(self, obj):
+            v = getattr(obj, "_available", 0) or 0
+            return max(0, int(v))
 
 
 @admin.register(Student)
@@ -211,15 +199,11 @@ class StudentAdmin(admin.ModelAdmin):
     autocomplete_fields = ("professor",)
 
     def has_module_permission(self, request):
-        # Hide "Students" from the admin app index/sidebar
         return False
 
 
 @admin.register(Professor)
 class ProfessorAdmin(admin.ModelAdmin):
-    """
-    Middle of the hierarchy: School → Professor → Rosters inline.
-    """
     list_display = ("last_name", "first_name", "school", "department", "email", "hire_date")
     search_fields = ("last_name", "first_name", "email", "department", "school__name")
     list_filter = ("school", "department")
@@ -230,14 +214,8 @@ class ProfessorAdmin(admin.ModelAdmin):
 
 @admin.register(Roster)
 class RosterAdmin(admin.ModelAdmin):
-    """
-    Bottom object: has the student-membership inline only.
-    Also shows Expiration + Status in list_display.
-    """
     form = RosterForm
-    change_form_template = "admin/campus/roster/change_form.html"  # your template (clipboard, etc.)
-
-    # Do NOT show the M2M "students" field at the top; everything is in the inline.
+    change_form_template = "admin/campus/roster/change_form.html"
     exclude = ("students",)
 
     list_display = (
@@ -260,11 +238,9 @@ class RosterAdmin(admin.ModelAdmin):
     inlines = [RosterStudentInline]
     autocomplete_fields = ("professor",)
 
-    # Remove the students field from the form even if ModelForm includes it
     def get_form(self, request, obj=None, **kwargs):
         form = super().get_form(request, obj, **kwargs)
         form.base_fields.pop("students", None)
-        # Relabel & constrain the discount field as a percentage (0–100)
         if "discount_amount" in form.base_fields:
             f = form.base_fields["discount_amount"]
             f.label = "Discount (%)"
@@ -274,12 +250,9 @@ class RosterAdmin(admin.ModelAdmin):
             f.widget.attrs.setdefault("placeholder", "e.g., 15 for 15%")
         return form
 
-    # Annotate student count for list page performance
     def get_queryset(self, request):
         qs = super().get_queryset(request)
         return qs.annotate(student_count=Count("students", distinct=True))
-
-    # Computed columns ---------------------------------
 
     @admin.display(description="School")
     def school_col(self, obj):
@@ -300,10 +273,6 @@ class RosterAdmin(admin.ModelAdmin):
 
     @admin.display(description="Total invoice")
     def total_invoice_col(self, obj):
-        """
-        total = (count * price) * (1 - discount_percent/100)
-        discount_amount is treated as a PERCENT (0–100).
-        """
         count = getattr(obj, "student_count", obj.students.count())
         total_before = PRICE_PER_STUDENT * Decimal(count)
         pct = (obj.discount_amount or Decimal("0")) / Decimal("100")
@@ -311,7 +280,6 @@ class RosterAdmin(admin.ModelAdmin):
         total = total_before * (Decimal("1") - pct)
         return f"${total:.2f}"
 
-    # Pass emails to your change_form template for the “Copy to Clipboard” button
     def render_change_form(self, request, context, add=False, change=False, form_url="", obj=None):
         emails_csv = ""
         if obj:
@@ -319,20 +287,16 @@ class RosterAdmin(admin.ModelAdmin):
         context["roster_emails_csv"] = emails_csv
         return super().render_change_form(request, context, add, change, form_url, obj)
 
-    # Handle removal via the inline "remove" checkbox
     def save_formset(self, request, form, formset, change):
-        # 1) Delete memberships marked for removal
         for f in formset.forms:
             if getattr(f, "cleaned_data", None):
                 if f.cleaned_data.get("remove") and f.instance.pk:
                     f.instance.delete()
-        # 2) Save remaining edits normally
         instances = formset.save(commit=False)
         for obj in instances:
             obj.save()
         formset.save_m2m()
 
-    # Import (CSV/XLSX/XML) with robust column parsing (letter or number)
     def save_model(self, request, obj, form, change):
         super().save_model(request, obj, form, change)
 
@@ -341,21 +305,17 @@ class RosterAdmin(admin.ModelAdmin):
         skip_rows = form.cleaned_data.get("skip_rows") or 0
 
         if not upload:
-            return  # no file provided
+            return
 
         def resolve_email_index(header_row, email_column_value):
             s = str(email_column_value or "").strip()
             if not s:
                 raise ValueError("Email column is required.")
-
-            # Number? (1-based)
             if s.isdigit():
                 idx = int(s) - 1
                 if idx < 0 or idx >= len(header_row):
                     raise ValueError("Email column number is out of range.")
                 return idx
-
-            # Letters? (A=1)
             if s.isalpha():
                 def letters_to_index(v):
                     v = v.upper()
@@ -369,18 +329,13 @@ class RosterAdmin(admin.ModelAdmin):
                 idx0 = idx1 - 1
                 if 0 <= idx0 < len(header_row):
                     return idx0
-                # otherwise fall through to header matching
-
-            # Header name match (case-insensitive)
             wanted = s.lower()
             normalized = [str(h or "").strip().lower() for h in header_row]
             if wanted in normalized:
                 return normalized.index(wanted)
-
             for c in ["email", "e-mail", "email address", "mail"]:
                 if c in normalized:
                     return normalized.index(c)
-
             raise ValueError(
                 f"Could not find email column '{email_column_value}'. "
                 f"Available headers: {', '.join([str(x) for x in header_row])}"
@@ -388,8 +343,6 @@ class RosterAdmin(admin.ModelAdmin):
 
         def iter_rows_from_upload(upload_file):
             name = (getattr(upload_file, "name", "") or "").lower()
-
-            # XLSX
             if name.endswith(".xlsx"):
                 try:
                     from openpyxl import load_workbook
@@ -406,8 +359,6 @@ class RosterAdmin(admin.ModelAdmin):
                 except Exception as e:
                     messages.error(request, f"Couldn't read XLSX: {e}")
                     return None
-
-            # Excel 2003 XML (SpreadsheetML)
             if name.endswith(".xml"):
                 try:
                     import xml.etree.ElementTree as ET
@@ -426,8 +377,6 @@ class RosterAdmin(admin.ModelAdmin):
                 except Exception as e:
                     messages.error(request, f"Couldn't parse Excel XML: {e}")
                     return None
-
-            # Default: CSV with encoding fallbacks
             for enc in ("utf-8-sig", "cp1252", "latin-1"):
                 try:
                     upload_file.file.seek(0)
@@ -445,7 +394,6 @@ class RosterAdmin(admin.ModelAdmin):
         if rows_iter is None:
             return
 
-        # First row is header
         try:
             header = next(rows_iter)
         except StopIteration:
@@ -458,7 +406,6 @@ class RosterAdmin(admin.ModelAdmin):
             messages.error(request, str(e))
             return
 
-        # Skip extra rows after header
         for _ in range(skip_rows):
             try:
                 next(rows_iter)
@@ -490,7 +437,6 @@ class RosterAdmin(admin.ModelAdmin):
                     obj.students.add(student)
                     linked_count += 1
 
-            # Save source filename once
             if hasattr(upload, "name") and not obj.source_filename:
                 obj.source_filename = upload.name
                 obj.save(update_fields=["source_filename"])
