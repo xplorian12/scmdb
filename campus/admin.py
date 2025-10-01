@@ -7,7 +7,8 @@ from io import TextIOWrapper
 from django import forms
 from django.contrib import admin, messages
 from django.db import transaction
-from django.db.models import Count, F
+from django.db.models import Count, F, Q, Value, IntegerField
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from .models import School, Professor, Student, Roster
@@ -122,7 +123,15 @@ def add_purchased_accounts(modeladmin, request, queryset):
 
 @admin.register(School)
 class SchoolAdmin(admin.ModelAdmin):
-    list_display = ("name", "professors_count", "rosters_count", "students_count")
+    list_display = (
+        "name",
+        "professors_count",
+        "rosters_count",
+        "students_count",
+        "activated_accounts_col",
+        "available_accounts_col",
+        "purchased_accounts",
+    )
     search_fields = ("name", "city", "state", "country")
     ordering = ("name",)
     list_per_page = 50
@@ -135,11 +144,39 @@ class SchoolAdmin(admin.ModelAdmin):
     action_form = AddAccountsActionForm
 
     def get_queryset(self, request):
+        """
+        Annotate all counts safely using correct reverse names:
+        - professors: School.professors (from Professor.school related_name="professors")
+        - rosters:    Professor.rosters
+        - students:   Professor.students (direct), or via rosters if you prefer
+        - activated:  distinct students with expiration_date >= today
+        - available:  purchased - activated (clamped at 0)
+        """
         qs = super().get_queryset(request)
-        return qs.annotate(
-            _professors_count=Count("professors", distinct=True),
-            _rosters_count=Count("professors__rosters", distinct=True),
-            _students_count=Count("professors__rosters__students", distinct=True),
+        today = timezone.now().date()
+
+        return (
+            qs
+            .annotate(
+                _professors_count=Count("professors", distinct=True),
+                _rosters_count=Count("professors__rosters", distinct=True),
+                _students_count=Count("professors__students", distinct=True),
+                _activated=Coalesce(
+                    Count(
+                        "professors__students",
+                        filter=Q(professors__students__expiration_date__gte=today),
+                        distinct=True,
+                    ),
+                    Value(0),
+                ),
+            )
+            .annotate(
+                _available=Coalesce(
+                    F("purchased_accounts") - F("_activated"),
+                    Value(0),
+                    output_field=IntegerField(),
+                )
+            )
         )
 
     @admin.display(description="Professors", ordering="_professors_count")
@@ -153,6 +190,15 @@ class SchoolAdmin(admin.ModelAdmin):
     @admin.display(description="Students", ordering="_students_count")
     def students_count(self, obj):
         return getattr(obj, "_students_count", 0) or 0
+
+    @admin.display(description="Activated", ordering="_activated")
+    def activated_accounts_col(self, obj):
+        return getattr(obj, "_activated", 0) or 0
+
+    @admin.display(description="Available", ordering="_available")
+    def available_accounts_col(self, obj):
+        v = getattr(obj, "_available", 0) or 0
+        return max(0, int(v))
 
 
 @admin.register(Student)
