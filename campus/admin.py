@@ -7,7 +7,7 @@ from io import TextIOWrapper
 from django import forms
 from django.contrib import admin, messages
 from django.db import transaction
-from django.db.models import Count
+from django.db.models import Count, F
 from django.utils import timezone
 
 from .models import School, Professor, Student, Roster
@@ -92,6 +92,31 @@ class RosterStudentInline(admin.TabularInline):
 
 
 # =========================
+# Admin action: increment purchased accounts on selected Schools
+# =========================
+
+class AddAccountsActionForm(forms.Form):
+    delta = forms.IntegerField(min_value=1, label="Add accounts by")
+
+
+@admin.action(description="Add to purchased accounts")
+def add_purchased_accounts(modeladmin, request, queryset):
+    raw = request.POST.get("delta")
+    try:
+        delta = int(raw)
+    except (TypeError, ValueError):
+        modeladmin.message_user(request, "Please enter a valid number in 'Add accounts by'.", level=messages.ERROR)
+        return
+
+    if delta <= 0:
+        modeladmin.message_user(request, "Number must be greater than 0.", level=messages.ERROR)
+        return
+
+    updated = queryset.update(purchased_accounts=F("purchased_accounts") + delta)
+    modeladmin.message_user(request, f"Added {delta} to {updated} school(s).", level=messages.SUCCESS)
+
+
+# =========================
 # Admin registrations
 # =========================
 
@@ -113,6 +138,10 @@ class SchoolAdmin(admin.ModelAdmin):
     list_filter = ("state", "country")
     ordering = ("name",)
     inlines = [ProfessorInline]
+
+    # enable the increment action + field on the changelist
+    actions = [add_purchased_accounts]
+    action_form = AddAccountsActionForm
 
     @admin.display(description="Region")
     def region_col(self, obj):
