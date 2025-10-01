@@ -54,10 +54,10 @@ class RosterStudentInlineForm(forms.ModelForm):
 
 class RosterStudentInline(admin.TabularInline):
     """
-    The ONLY place to manage students in THIS roster.
+    Manage students in THIS roster.
     - 'Remove' checkbox per row (we delete the membership in save_formset)
     - Shift-click range selection (requires static/admin/roster_inline_shift_select.js)
-    - One blank row to add a student; filtered to this roster's professor
+    - One blank row to add a student; choices filtered to this roster's professor
     """
     model = Roster.students.through
     form = RosterStudentInlineForm
@@ -123,9 +123,16 @@ def add_purchased_accounts(modeladmin, request, queryset):
 @admin.register(School)
 class SchoolAdmin(admin.ModelAdmin):
     list_display = ("name", "professors_count", "rosters_count", "students_count")
-    search_fields = ("name", "city", "state", "country")  # removed non-existent "domain"
+    search_fields = ("name", "city", "state", "country")
     ordering = ("name",)
     list_per_page = 50
+
+    # show Professors inline on School (hierarchy: School → Professor)
+    inlines = [ProfessorInline]
+
+    # expose the bulk action on School
+    actions = [add_purchased_accounts]
+    action_form = AddAccountsActionForm
 
     def get_queryset(self, request):
         qs = super().get_queryset(request)
@@ -146,6 +153,21 @@ class SchoolAdmin(admin.ModelAdmin):
     @admin.display(description="Students", ordering="_students_count")
     def students_count(self, obj):
         return getattr(obj, "_students_count", 0) or 0
+
+
+@admin.register(Student)
+class StudentAdmin(admin.ModelAdmin):
+    """
+    Hidden from the sidebar, but registered so autocomplete/popups work.
+    Required because RosterStudentInline uses autocomplete_fields=("student",).
+    """
+    search_fields = ("email", "first_name", "last_name", "professor__last_name", "professor__first_name")
+    autocomplete_fields = ("professor",)
+
+    def has_module_permission(self, request):
+        # Hide "Students" from the admin app index/sidebar
+        return False
+
 
 @admin.register(Professor)
 class ProfessorAdmin(admin.ModelAdmin):
@@ -180,7 +202,7 @@ class RosterAdmin(admin.ModelAdmin):
         "student_count_col",
         "discount_percent_col",
         "total_invoice_col",
-        "expiration_date",   # requires models.py field
+        "expiration_date",
         "invoice_sent",
         "created_at",
     )
