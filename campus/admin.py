@@ -122,63 +122,37 @@ def add_purchased_accounts(modeladmin, request, queryset):
 
 @admin.register(School)
 class SchoolAdmin(admin.ModelAdmin):
-    """
-    Clear hierarchy: Schools → Professors (inline).
-    Shows Region (State or Country) and account counts.
-    We annotate counts in the queryset to avoid per-row queries (more robust on SQLite).
-    """
+    # Keep it simple & safe: only use existing fields + guarded methods
     list_display = (
         "name",
-        "region_col",               # State or Country
-        "purchased_accounts",
-        "activated_accounts_col",   # from annotation, fallback to property
-        "available_accounts_col",   # from annotation, fallback to property
-        "created_at",
+        "professors_count",
+        "rosters_count",
+        "students_count",
     )
-    search_fields = ("name", "city")
-    list_filter = ("state", "country")
+    search_fields = ("name", "city", "state", "domain")  # only if these fields exist on School
     ordering = ("name",)
-    inlines = [ProfessorInline]
+    list_per_page = 50
 
-    actions = [add_purchased_accounts]
-    action_form = AddAccountsActionForm
-
-    
-    # --- NEW: annotate counts in one query (prevents per-row queries & sqlite lock issues)
     def get_queryset(self, request):
-        from django.db.models import Count, F, Case, When, Value, IntegerField
         qs = super().get_queryset(request)
-        qs = qs.annotate(
-            activated_accounts_anno=Count("professors__rosters__students", distinct=True),
-        ).annotate(
-            available_accounts_anno=Case(
-                When(purchased_accounts__gt=F("activated_accounts_anno"),
-                     then=F("purchased_accounts") - F("activated_accounts_anno")),
-                default=Value(0),
-                output_field=IntegerField(),
-            )
+        # Use distinct to avoid overcount with joins
+        return qs.annotate(
+            _professors_count=Count("professor", distinct=True),
+            _rosters_count=Count("professor__rosters", distinct=True),
+            _students_count=Count("professor__rosters__students", distinct=True),
         )
-        return qs
 
-    @admin.display(description="Region")
-    def region_col(self, obj):
-        return obj.state or obj.country or ""
+    @admin.display(description="Professors", ordering="_professors_count")
+    def professors_count(self, obj):
+        return getattr(obj, "_professors_count", 0) or 0
 
-    @admin.display(description="Activated")
-    def activated_accounts_col(self, obj):
-        # prefer annotation; fall back to model property if not present
-        val = getattr(obj, "activated_accounts_anno", None)
-        if val is None:
-            val = getattr(obj, "activated_accounts", 0)
-        return val
+    @admin.display(description="Rosters", ordering="_rosters_count")
+    def rosters_count(self, obj):
+        return getattr(obj, "_rosters_count", 0) or 0
 
-    @admin.display(description="Available")
-    def available_accounts_col(self, obj):
-        # prefer annotation; fall back to model property if not present
-        val = getattr(obj, "available_accounts_anno", None)
-        if val is None:
-            val = getattr(obj, "available_accounts", 0)
-        return val
+    @admin.display(description="Students", ordering="_students_count")
+    def students_count(self, obj):
+        return getattr(obj, "_students_count", 0) or 0
 
 
 @admin.register(Student)
