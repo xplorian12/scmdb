@@ -124,14 +124,15 @@ def add_purchased_accounts(modeladmin, request, queryset):
 class SchoolAdmin(admin.ModelAdmin):
     """
     Clear hierarchy: Schools → Professors (inline).
-    Shows Region (State or Country) and account counts (fields added in models.py).
+    Shows Region (State or Country) and account counts.
+    We annotate counts in the queryset to avoid per-row queries (more robust on SQLite).
     """
     list_display = (
         "name",
         "region_col",               # State or Country
-        "purchased_accounts",       # editable in form (models.py)
-        "activated_accounts_col",   # computed property (models.py)
-        "available_accounts_col",   # computed property (models.py)
+        "purchased_accounts",
+        "activated_accounts_col",   # from annotation, fallback to property
+        "available_accounts_col",   # from annotation, fallback to property
         "created_at",
     )
     search_fields = ("name", "city")
@@ -139,9 +140,21 @@ class SchoolAdmin(admin.ModelAdmin):
     ordering = ("name",)
     inlines = [ProfessorInline]
 
-    # enable the increment action + field on the changelist
-    actions = [add_purchased_accounts]
-    action_form = AddAccountsActionForm
+    # --- NEW: annotate counts in one query (prevents per-row queries & sqlite lock issues)
+    def get_queryset(self, request):
+        from django.db.models import Count, F, Case, When, Value, IntegerField
+        qs = super().get_queryset(request)
+        qs = qs.annotate(
+            activated_accounts_anno=Count("professors__rosters__students", distinct=True),
+        ).annotate(
+            available_accounts_anno=Case(
+                When(purchased_accounts__gt=F("activated_accounts_anno"),
+                     then=F("purchased_accounts") - F("activated_accounts_anno")),
+                default=Value(0),
+                output_field=IntegerField(),
+            )
+        )
+        return qs
 
     @admin.display(description="Region")
     def region_col(self, obj):
@@ -149,13 +162,19 @@ class SchoolAdmin(admin.ModelAdmin):
 
     @admin.display(description="Activated")
     def activated_accounts_col(self, obj):
-        # expects School.activated_accounts property in models.py
-        return getattr(obj, "activated_accounts", 0)
+        # prefer annotation; fall back to model property if not present
+        val = getattr(obj, "activated_accounts_anno", None)
+        if val is None:
+            val = getattr(obj, "activated_accounts", 0)
+        return val
 
     @admin.display(description="Available")
     def available_accounts_col(self, obj):
-        # expects School.available_accounts property in models.py
-        return getattr(obj, "available_accounts", 0)
+        # prefer annotation; fall back to model property if not present
+        val = getattr(obj, "available_accounts_anno", None)
+        if val is None:
+            val = getattr(obj, "available_accounts", 0)
+        return val
 
 
 @admin.register(Student)
