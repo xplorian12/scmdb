@@ -122,24 +122,17 @@ def add_purchased_accounts(modeladmin, request, queryset):
 
 @admin.register(School)
 class SchoolAdmin(admin.ModelAdmin):
-    # Keep it simple & safe: only use existing fields + guarded methods
-    list_display = (
-        "name",
-        "professors_count",
-        "rosters_count",
-        "students_count",
-    )
-    search_fields = ("name", "city", "state", "domain")  # only if these fields exist on School
+    list_display = ("name", "professors_count", "rosters_count", "students_count")
+    search_fields = ("name", "city", "state", "country")  # removed non-existent "domain"
     ordering = ("name",)
     list_per_page = 50
 
     def get_queryset(self, request):
         qs = super().get_queryset(request)
-        # Use distinct to avoid overcount with joins
         return qs.annotate(
-            _professors_count=Count("professor", distinct=True),
-            _rosters_count=Count("professor__rosters", distinct=True),
-            _students_count=Count("professor__rosters__students", distinct=True),
+            _professors_count=Count("professors", distinct=True),
+            _rosters_count=Count("professors__rosters", distinct=True),
+            _students_count=Count("professors__rosters__students", distinct=True),
         )
 
     @admin.display(description="Professors", ordering="_professors_count")
@@ -153,19 +146,6 @@ class SchoolAdmin(admin.ModelAdmin):
     @admin.display(description="Students", ordering="_students_count")
     def students_count(self, obj):
         return getattr(obj, "_students_count", 0) or 0
-
-
-@admin.register(Student)
-class StudentAdmin(admin.ModelAdmin):
-    """
-    Hidden from the sidebar, but registered so the green ➕ popup works.
-    """
-    search_fields = ("email", "first_name", "last_name", "professor__last_name", "professor__first_name")
-    autocomplete_fields = ("professor",)
-
-    def has_module_permission(self, request):
-        return False
-
 
 @admin.register(Professor)
 class ProfessorAdmin(admin.ModelAdmin):
